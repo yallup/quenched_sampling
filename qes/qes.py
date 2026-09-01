@@ -20,7 +20,7 @@ from blackjax.smc.resampling import systematic
 from blackjax.smc.solver import dichotomy
 
 from .adapt import Drift, Gain, drift_init, drift_update, dual_init, dual_update
-from .kernel import build_mutation, build_mutation_hmc
+from .kernel import build_mutation
 from .level import (
     boundary,
     ess_fraction,
@@ -56,12 +56,11 @@ class LevelInfo(NamedTuple):
 
 
 class LevelSample(NamedTuple):
-    """One rung's contribution to the pooled cloud: retained walkers, their
-    carried within-rung log weights, and any tracked summary."""
+    """One rung's contribution to the pooled cloud: retained walkers and
+    their carried within-rung log weights."""
 
     walkers: Array
     log_w: Array
-    stat: Array
 
 
 class Result(NamedTuple):
@@ -72,7 +71,6 @@ class Result(NamedTuple):
     Es: np.ndarray
     log_lambdas: np.ndarray
     snapshots: np.ndarray  # (n_levels, n_keep, D), the cloud at each rung
-    stats: np.ndarray  # (n_levels, n_walkers, k), track(cloud) at each rung
     log_weights: np.ndarray  # (n_levels, n_walkers), per-walker within a rung
     ess: np.ndarray
     step_sizes: np.ndarray
@@ -148,30 +146,22 @@ def anchor(
 # ---------------------------------------------------------------------------
 def _build_level(
     U_fn, log_prior, nu, n_steps, target_ess, acc_target, step_gain, metric_gain,
-    n_keep, track, resample_ess, n_leapfrog, metric_mode="score",
+    n_keep, resample_ess, metric_mode="score",
 ):
     """Compile a mutate-and-adapt pass and one full level transition."""
-    mutate = (build_mutation(level_logdensity(U_fn, log_prior, nu), n_steps)
-              if n_leapfrog is None else
-              build_mutation_hmc(level_logdensity(U_fn, log_prior, nu),
-                                 n_steps, n_leapfrog))
+    mutate = build_mutation(level_logdensity(U_fn, log_prior, nu), n_steps)
     U_batched = jax.vmap(U_fn)
 
     def mutate_and_adapt(state: LadderState):
         key, key_mutate = jax.random.split(state.key)
         # metric statistics use the carried weights and the lineage ESS
         n_w = state.particles.shape[0]
-        if metric_mode == "score_rows":
-            # unweighted rows: the pre-lineage-correction estimator
-            w = jnp.full((n_w,), 1.0 / n_w, state.particles.dtype)
-            ess_frac = jnp.asarray(1.0, state.particles.dtype)
-        else:
-            w = jnp.exp(state.log_W - logsumexp(state.log_W))
-            w = jnp.where(jnp.isfinite(w), w, 0.0)
-            w = w / jnp.maximum(jnp.sum(w), 1e-300)
-            grouped = jnp.bincount(state.ancestor, weights=w, length=n_w)
-            ess_frac = jnp.clip(
-                1.0 / jnp.maximum(jnp.sum(grouped ** 2), 1e-30) / n_w, 0.0, 1.0)
+        w = jnp.exp(state.log_W - logsumexp(state.log_W))
+        w = jnp.where(jnp.isfinite(w), w, 0.0)
+        w = w / jnp.maximum(jnp.sum(w), 1e-300)
+        grouped = jnp.bincount(state.ancestor, weights=w, length=n_w)
+        ess_frac = jnp.clip(
+            1.0 / jnp.maximum(jnp.sum(grouped ** 2), 1e-30) / n_w, 0.0, 1.0)
         x, acceptance, log_sd = mutate(
             key_mutate,
             state.particles,
@@ -190,7 +180,7 @@ def _build_level(
             min_U=jnp.minimum(state.min_U,
                               jnp.min(jnp.where(jnp.isfinite(U), U, jnp.inf))),
             step=drift_update(state.step, acceptance - acc_target, step_gain),
-            metric=(state.metric if metric_mode in ("frozen", "unit")
+            metric=(state.metric if metric_mode == "unit"
                     else drift_update(
                         state.metric, log_sd - state.metric.value,
                         metric_gain)),
@@ -271,8 +261,6 @@ def _build_level(
         return new, info, LevelSample(
             walkers=state.particles[:n_keep],
             log_w=log_W,
-            stat=(jnp.zeros((n, 0), state.particles.dtype) if track is None
-                  else track(state.particles)),
         )
 
     @partial(jax.jit, static_argnames=("n",))
@@ -324,20 +312,10 @@ def run(
     n_init: int | None = None,
     n_start: int | None = None,
     n_warmup: int = 30,
-    n_steps_first: int | None = None,
-    n_first: int = 2,
-    heavy_above: float | None = None,
-    step_size: float = 0.1,
-    acc_target: float = 0.574,
-    step_gain: Gain = Gain(rate=0.5, kappa=0.0, floor=0.0, poly=0.15),
-    metric_gain: Gain = Gain(rate=1.0, kappa=0.0, floor=0.0, poly=1.0),
-    max_levels: int = 20_000,
-    E_stop: float | None = None,
     metric_mode: str = "score",
-    n_keep: int = 40,
-    track: Callable | None = None,
     resample_ess: float = 0.5,
-    n_leapfrog: int | None = None,
+    max_levels: int = 20_000,
+    n_keep: int = 40,
     verbose: int = 0,
 ) -> Result:
     """Estimate log Z by a quenched ladder of soft level ensembles.
@@ -358,19 +336,17 @@ def run(
     n_start
         Place E_0 at the n_start-th smallest prior energy; for priors with a
         divergent core.
-    n_steps_first, n_first, heavy_above
-        Larger mutation budget for the first n_first rungs, or above the
-        energy heavy_above.
     metric_mode
-        "score" adapts the diagonal metric down the ladder, "score_rows" is
-        the row-count variant, "frozen" holds the warmed metric, "unit" is the
+        "score" adapts the diagonal metric down the ladder; "unit" is the
         identity throughout.
     resample_ess
         Full-resample trigger on the lineage-grouped ESS fraction.
     """
-    if metric_mode not in ("score", "score_rows", "frozen", "unit"):
-        raise ValueError(f"metric_mode={metric_mode!r} is not one of "
-                         "'score', 'score_rows', 'frozen', 'unit'")
+    if metric_mode not in ("score", "unit"):
+        raise ValueError(f"metric_mode={metric_mode!r} is not 'score' or 'unit'")
+    acc_target, step_size = 0.574, 0.1
+    step_gain = Gain(rate=0.5, kappa=0.0, floor=0.0, poly=0.15)
+    metric_gain = Gain(rate=1.0, kappa=0.0, floor=0.0, poly=1.0)
     n_init = 10 * n_walkers if n_init is None else n_init
     if n_init < n_walkers:
         raise ValueError(f"n_init={n_init} cannot furnish n_walkers={n_walkers}")
@@ -381,12 +357,8 @@ def run(
     )
     level, warmup = _build_level(
         U_fn, log_prior, nu, n_steps, target_ess, acc_target, step_gain,
-        metric_gain, n_keep, track, resample_ess, n_leapfrog, metric_mode,
+        metric_gain, n_keep, resample_ess, metric_mode,
     )
-    level_first = level if n_steps_first is None else _build_level(
-        U_fn, log_prior, nu, n_steps_first, target_ess, acc_target, step_gain,
-        metric_gain, n_keep, track, resample_ess, n_leapfrog, metric_mode,
-    )[0]
 
     if metric_mode == "unit":
         sd0 = jnp.ones_like(x0[0])
@@ -418,13 +390,10 @@ def run(
         )
 
     Es, log_lambdas = [float(E0)], [float(log_lambda0)]
-    ess, steps, accs, snapshots = [], [], [], []
-    stats, log_ws = [], []
+    ess, steps, accs, snapshots, log_ws = [], [], [], [], []
     E_prev = float(E0)
     for k in range(max_levels):
-        heavy = (k < n_first if heavy_above is None
-                 else float(state.E) > heavy_above)
-        state, info, sample = (level_first if heavy else level)(state)
+        state, info, sample = level(state)
         info = jax.device_get(info)  # one host transfer per level
 
         # level spacing below the resolution of E: converged
@@ -438,8 +407,6 @@ def run(
         accs.append(float(info.acceptance))
         snapshots.append(np.asarray(sample.walkers))
         log_ws.append(np.asarray(sample.log_w))
-        if track is not None:
-            stats.append(np.asarray(sample.stat))
         E_prev = float(info.E)
 
         if verbose and k % verbose == 0:
@@ -453,8 +420,6 @@ def run(
         if float(info.log_lambda - info.min_U - info.log_integral) < dlogz:
             break
         if info.E - info.min_U < 1e-10 * (Es[0] - info.min_U):
-            break
-        if E_stop is not None and float(info.E) <= E_stop:
             break
 
     # keep host records in the sampler's own precision
@@ -484,7 +449,6 @@ def run(
         Es=Es,
         log_lambdas=log_lambdas,
         snapshots=np.asarray(snapshots) if snapshots else np.empty((0, 0, 0)),
-        stats=np.asarray(stats) if stats else np.empty((0, 0, 0)),
         log_weights=np.asarray(log_ws) if log_ws else np.empty((0, 0)),
         ess=np.asarray(ess, dtype),
         step_sizes=np.asarray(steps, dtype),

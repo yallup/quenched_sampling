@@ -1,14 +1,13 @@
-"""Mutation kernels: blackjax MALA or HMC, preconditioned by the score."""
+"""Mutation kernel: blackjax MALA, preconditioned by the score."""
 from typing import Callable
 
 import jax
 import jax.numpy as jnp
 from jax import Array
 
-from blackjax.mcmc import hmc, mala
+from blackjax.mcmc import mala
 
 _mala_kernel = mala.build_kernel()
-_hmc_kernel = hmc.build_kernel()
 
 
 def _tiny(x: Array) -> Array:
@@ -50,52 +49,6 @@ def build_mutation(logdensity_fn: Callable, n_steps: int) -> Callable:
             def body(carry, key):
                 state, pattern, log_g2 = carry
                 state, info = _mala_kernel(key, state, logdensity, step_size)
-                g = state.logdensity_grad / sd
-                g2 = jnp.sum(g**2)
-                return (state, pattern + g**2 / g2, log_g2 + jnp.log(g2)), (
-                    info.acceptance_rate
-                )
-
-            init = (state, jnp.zeros_like(position), jnp.zeros((), position.dtype))
-            (state, pattern, log_g2), acceptance = jax.lax.scan(
-                body, init, jax.random.split(key, n_steps)
-            )
-            return (
-                state.position * sd,
-                pattern / n_steps,
-                log_g2 / n_steps,
-                jnp.mean(acceptance),
-            )
-
-        keys = jax.random.split(key, particles.shape[0])
-        positions, pattern, log_g2, acceptance = jax.vmap(one_walker)(keys, particles)
-        return positions, jnp.mean(acceptance), _log_metric(
-            pattern, log_g2, weights, ess_frac)
-
-    return mutate
-
-
-def build_mutation_hmc(logdensity_fn: Callable, n_steps: int,
-                       n_leapfrog: int) -> Callable:
-    """As build_mutation, with n_leapfrog-step HMC trajectories per step."""
-
-    @jax.jit
-    def mutate(key: Array, particles: Array, E: Array, step_size: Array,
-               sd: Array, weights: Array, ess_frac: Array):
-        def one_walker(key: Array, position: Array):
-            logdensity = lambda y: logdensity_fn(y * sd, E)
-            state = hmc.init(position / sd, logdensity)
-            imm = jnp.ones_like(position)
-
-            def body(carry, key):
-                state, pattern, log_g2 = carry
-                # jitter the step +-20% to detune periodic orbits
-                key, k_jit = jax.random.split(key)
-                eps = step_size * (0.8 + 0.4 * jax.random.uniform(k_jit))
-                state, info = _hmc_kernel(
-                    key, state, logdensity, eps, imm,
-                    num_integration_steps=n_leapfrog,
-                )
                 g = state.logdensity_grad / sd
                 g2 = jnp.sum(g**2)
                 return (state, pattern + g**2 / g2, log_g2 + jnp.log(g2)), (

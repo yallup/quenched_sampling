@@ -70,7 +70,7 @@ def main() -> None:
     p.add_argument("--nu", type=float, default=2.0)
     p.add_argument("--target-ess", type=float, default=0.95)
     p.add_argument("--metric", default="unit",
-                   choices=("unit", "score", "frozen"),
+                   choices=("unit", "score"),
                    help="the archived runs use the identity mass")
     p.add_argument("--method", choices=("qes", "tempered"), default="qes")
     p.add_argument("--posterior-draws", type=int, default=20_000)

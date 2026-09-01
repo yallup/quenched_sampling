@@ -181,10 +181,6 @@ def run(
     target_ess: float = 0.8,
     n_beta: int | None = None,
     n_warmup: int = 30,
-    step_size: float = 0.1,
-    acc_target: float = 0.574,
-    step_gain: Gain = Gain(rate=0.5, kappa=0.0, floor=0.0, poly=0.15),
-    metric_gain: Gain = Gain(rate=1.0, kappa=0.0, floor=0.0, poly=1.0),
     metric_mode: str = "score",
     max_stages: int = 20_000,
     n_keep: int = 40,
@@ -192,6 +188,11 @@ def run(
 ) -> TemperedResult:
     """Estimate log Z by adaptive tempered SMC; n_beta prescribes an equally
     spaced ladder instead of the adaptive one."""
+    if metric_mode not in ("score", "unit"):
+        raise ValueError(f"metric_mode={metric_mode!r} is not 'score' or 'unit'")
+    acc_target, step_size = 0.574, 0.1
+    step_gain = Gain(rate=0.5, kappa=0.0, floor=0.0, poly=0.15)
+    metric_gain = Gain(rate=1.0, kappa=0.0, floor=0.0, poly=1.0)
     key, key_init, key_run = jax.random.split(key, 3)
     x = sample_prior(key_init, n_walkers)
     U = jax.vmap(U_fn)(x)
@@ -202,9 +203,6 @@ def run(
     )
     grid = None if n_beta is None else np.linspace(0.0, 1.0, int(n_beta) + 1)[1:]
 
-    if metric_mode not in ("score", "frozen", "unit"):
-        raise ValueError(f"metric_mode={metric_mode!r} is not one of "
-                         "'score', 'frozen', 'unit'")
     if metric_mode == "unit":
         sd0 = jnp.ones_like(x[0])
     else:
