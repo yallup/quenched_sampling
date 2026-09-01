@@ -1,26 +1,6 @@
-"""Adaptive tempered SMC, matched to the quenched ladder in all but the path.
-
-    p_beta(x) ∝ pi(x) L(x)^beta,   beta: 0 -> 1,
-
-against the level family pi (E-U)_+^nu. Same population, same score-metric MALA
-(`qes.kernel.build_mutation`, handed a different logdensity), same mutation
-budget, same ESS criterion for the next rung, same warmup, and the same
-Robbins-Monro step controller and gains. Matched by construction rather than by
-assertion: an earlier version of this comparison preconditioned the tempered arm
-by the cloud variance while the ladder used the score metric, which is exactly
-the difference a multimodal target is built to expose.
-
-Resampling is every stage here, unlike the ladder's branch-and-trigger cadence:
-a tempered weight is strictly positive, so no particle ever leaves the support
-and there is nothing to branch.
-
-`n_beta` prescribes an equally spaced ladder instead of reading it off the
-population. It is the rung-matched control -- adaptively, tempering reaches
-beta = 1 in tens of stages, so "tempering misses the ordered phase" invites the
-objection that it was starved of rungs. It is also the unbiased form: a fixed
-schedule with unbiased resampling gives E[Zhat] = Z exactly, where an adaptive
-one is only consistent.
-"""
+"""Adaptive tempered SMC over p_beta ∝ pi L^beta, matched to the quenched
+ladder in population, kernel, budget, ESS criterion, warmup, and controller;
+only the path differs."""
 import math
 from functools import partial
 from typing import Callable, NamedTuple
@@ -86,13 +66,7 @@ class TemperedResult(NamedTuple):
 
 
 def next_beta(U: Array, beta: Array, target_ess: float) -> Array:
-    """The next inverse temperature whose increment retains `target_ess`.
-
-    blackjax's own tempering solver, on the incremental weight delta * log L
-    with log L = -U. Its dichotomy returns the bracket end when the whole
-    remaining range already meets the target, which is the jump straight to
-    beta = 1.
-    """
+    """Next inverse temperature whose increment retains target_ess."""
     delta = ess_solver(
         lambda particles: -particles,  # log L at the particles' energies
         U,
@@ -110,12 +84,7 @@ def _build_stage(U_fn, log_prior, n_steps, acc_target, step_gain, metric_gain,
 
     def mutate_and_adapt(state: TemperedState, ess_frac: Array):
         key, key_mutate = jax.random.split(state.key)
-        # The cloud entering the mutation was just resampled, so its rows are
-        # duplicated copies, not independent draws. The metric's shrinkage is
-        # told how many lineages there really are -- the ESS of the incremental
-        # weights that drove that resample -- exactly as the ladder is. The
-        # weights themselves are uniform here because tempering resets them
-        # every stage; the ladder carries them, and that is the only difference.
+        # uniform weights (resampled every stage); lineage count from the ESS
         n_w = state.particles.shape[0]
         x, acceptance, log_sd = mutate(
             key_mutate,
@@ -135,9 +104,6 @@ def _build_stage(U_fn, log_prior, n_steps, acc_target, step_gain, metric_gain,
                 state.min_U, jnp.min(jnp.where(jnp.isfinite(U), U, jnp.inf))
             ),
             step=drift_update(state.step, acceptance - acc_target, step_gain),
-            # matched to the ladder: "frozen" warms at the first beta and
-            # then holds, "unit" never has a matrix, and either way the step
-            # size is the only thing adapting along the path.
             metric=(state.metric if metric_mode != "score" else drift_update(
                 state.metric, log_sd - state.metric.value, metric_gain)),
         )
@@ -170,18 +136,12 @@ def _build_stage(U_fn, log_prior, n_steps, acc_target, step_gain, metric_gain,
             ess=ess_frac,
             step_size=jnp.exp(state.step.average),
         )
-        # the posterior weight of every particle at this stage, log Z_beta
-        # - (1-beta) U, which is what pools the whole path rather than its last
-        # cloud -- the same accounting the ladder gets from its rung weights.
+        # per-particle posterior weight log Z_beta - (1 - beta) U, for pooling
         return state, info, state.particles[:n_keep], log_Z - (1.0 - beta_new) * state.U
 
     @partial(jax.jit, static_argnames=("n",))
     def warmup(state: TemperedState, n: int):
-        """Nesterov dual averaging at the first stage's beta, exactly as the
-        ladder warms at E_0 -- the same recursion from `qes.adapt`, since the
-        stage controller is constant-gain and proportional and so needs a start
-        within a factor of a few. A step orders off scale gives acceptance
-        0.000 and a frozen population that still returns a number."""
+        """Dual-averaging warmup at the first stage's beta."""
 
         def body(carry, key):
             st, da = carry
@@ -230,8 +190,8 @@ def run(
     n_keep: int = 40,
     verbose: int = 0,
 ) -> TemperedResult:
-    """Estimate log Z by adaptive tempered SMC. Arguments mirror `qes.run`; only
-    `n_beta` (a prescribed equally spaced ladder) is particular to this path."""
+    """Estimate log Z by adaptive tempered SMC; n_beta prescribes an equally
+    spaced ladder instead of the adaptive one."""
     key, key_init, key_run = jax.random.split(key, 3)
     x = sample_prior(key_init, n_walkers)
     U = jax.vmap(U_fn)(x)
@@ -283,9 +243,7 @@ def run(
         if grid is None:
             beta_new = next_beta(state.U, state.beta, target_ess)
         else:
-            # indexed by stage, not searched by value: the grid is float64 and
-            # beta is the sampler's dtype, so a value search stalls the moment
-            # the round trip lands below the rung it just took.
+            # indexed by stage: a float32/float64 value search can stall
             beta_new = jnp.asarray(grid[min(k, len(grid) - 1)], x.dtype)
 
         state, info, snapshot, log_q = stage(state, beta_new)
@@ -341,10 +299,7 @@ def run(
 
 
 def posterior_sample(key: Array, result: TemperedResult, n: int) -> np.ndarray:
-    """Equally weighted posterior draws pooled over every stage, weighting a
-    particle at beta_k by log Z_beta - (1-beta_k) U. Scoring this arm on its
-    final cloud alone while the ladder pools its whole path would not be the
-    same question."""
+    """Draw equally weighted posterior samples pooled over every stage."""
     if result.snapshots.size == 0:
         raise ValueError("no snapshots were stored; run with n_keep > 0")
     n_keep = result.snapshots.shape[1]

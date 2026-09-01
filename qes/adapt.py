@@ -1,25 +1,5 @@
-"""Robbins-Monro control with Polyak averaging, for both adapted quantities.
-
-    theta_k+1    = theta_k    + gamma_k * signal,      gamma_k = rate * (k+1)^-kappa
-    thetabar_k+1 = (1 - poly) thetabar_k + poly theta_k+1.
-
-The gain is CONSTANT by default (kappa = 0): textbook Robbins-Monro decays it to
-converge on a FIXED optimum, and ours moves at every level, so a decaying gain
-stops tracking. Constant gain trades convergence for a bounded stationary
-tracking error, which is the right trade on a quenched path. `floor` bounds the
-decay if a kappa > 0 is asked for, so the recursion never stops tracking.
-
-`poly` is an independent averaging weight, not the gain: tying the two makes the
-average degenerate exactly when the gain is large enough to be useful (at gamma
-= 1 the "average" is just the latest iterate). Averaging is what makes a gain
-large enough to track also safe to use.
-
-Which readout to use depends on the signal. An error signal that is only zero at
-the optimum (acc - acc*) leaves the iterate a noise-driven walk: use `average`.
-An observation of the quantity itself (obs - theta) already makes the iterate an
-average: use `value`, since averaging it again is a second-order lag, measured
-here as an acceptance dip while the level descends.
-"""
+"""Step-size and metric adaptation: constant-gain Robbins-Monro with Polyak
+averaging for the descent, Nesterov dual averaging for the warmup."""
 import math
 from typing import NamedTuple
 
@@ -28,10 +8,10 @@ from jax import Array
 
 
 class Gain(NamedTuple):
-    """gamma_k = rate * max((k+1)^-kappa, floor), and the Polyak weight."""
+    """gamma_k = rate * max((k+1)^-kappa, floor), plus the Polyak weight."""
 
     rate: float = 0.5
-    kappa: float = 0.0  # 0 is constant gain: the optimum drifts with the level
+    kappa: float = 0.0  # constant gain: the optimum drifts with the level
     floor: float = 0.0
     poly: float = 0.15
 
@@ -55,20 +35,7 @@ def drift_update(state: Drift, signal: Array, gain: Gain) -> Drift:
 
 
 class DualAveraging(NamedTuple):
-    """Nesterov dual averaging, as in Stan/NUTS. For the WARMUP only.
-
-    The recursion above tracks a drifting optimum but only proportionally, so
-    the value it starts from has to be within a factor of a few. A fixed step
-    size is not: four orders out is routine across targets, and the failure is
-    silent rather than slow -- at zero acceptance the particles are frozen, min
-    U never improves, the dissection drives E onto that floor and the run exits
-    on gap collapse with an evidence that looks converged.
-
-    Dual averaging converges ON the target rate rather than bracketing it, and
-    its averaged iterate is insensitive to the noise in any single acceptance.
-    It is the right tool at a FIXED level and the wrong one once the ladder
-    moves, which is why it warms up and then hands over.
-    """
+    """Nesterov dual averaging on the log step size, as in Stan."""
 
     log_step: Array
     log_step_bar: Array
@@ -78,11 +45,8 @@ class DualAveraging(NamedTuple):
 
 
 def dual_init(log_step, factor: float = 10.0) -> DualAveraging:
-    """From a LOG step, as both callers hold one."""
     log_step = jnp.asarray(log_step)
     zero = jnp.zeros_like(log_step)
-    # mu is the point the iterate is shrunk toward: above the initial guess,
-    # since a step that is too small is the failure that hides.
     return DualAveraging(log_step, log_step, zero, log_step + math.log(factor), zero)
 
 
