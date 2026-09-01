@@ -1,0 +1,27 @@
+[project]
+name = "qes"
+version = "0.1.0"
+description = "Quenched ensemble sampling"
+authors = [{ name = "David Yallup" }]
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "blackjax==1.6.*",
+    "jax>=0.11",
+    "numpy",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+cuda = ["jax[cuda12]>=0.11"]
+plot = ["matplotlib", "tueplots", "scipy"]
+tpu = ["jax[tpu]>=0.11"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["qes"]

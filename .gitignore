@@ -1,0 +1,10 @@
+__pycache__/
+*.py[co]
+.venv/
+.pytest_cache/
+dist/
+*.aux
+*.log
+*.out
+*.synctex.gz
+*.npz
