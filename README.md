@@ -3,21 +3,25 @@
 Evidence estimation by sequential Monte Carlo over a family of **soft** level
 ensembles
 
-$$\rho_E(x) \propto \pi(x)\,(E - U(x))_+^{\nu}, \qquad U = -\log\mathcal{L},$$
+```math
+\rho_E(x) \propto \pi(x) (E - U(x))_+^{\nu}, \qquad U = -\log \mathcal{L},
+```
 
-with $E$ stepped downward. The level volume
-$G_\nu(E) = \mathbb{E}_\pi[(E-U)_+^\nu]$ is measured along the ladder by
+with $`E`$ stepped downward. The level volume
+$`G_\nu(E) = \mathrm{E}_\pi[(E-U)_+^\nu]`$ is measured along the ladder by
 telescoped weight averages, and
 
-$$Z = \frac{1}{\Gamma(\nu+1)}\int G_\nu(E)\,e^{-E}\,\mathrm{d}E .$$
+```math
+Z = \frac{1}{\Gamma(\nu+1)} \int G_\nu(E) e^{-E} \mathrm{d}E .
+```
 
-$\nu$ interpolates the two incumbents: $\nu \to 0$ is nested sampling's hard
-constraint, whose score vanishes identically; $\nu \to \infty$ is tempering,
+$`\nu`$ interpolates the two incumbents: $`\nu \to 0`$ is nested sampling's hard
+constraint, whose score vanishes identically; $`\nu \to \infty`$ is tempering,
 one effective temperature instead of a band. The interior is usable by a
 gradient kernel and has no band of energies to skip.
 
 The two paths on an asymmetric double well, both starting from the prior —
-QES quenching a level to depth beside tempered SMC annealing $\beta$, with
+QES quenching a level to depth beside tempered SMC annealing $`\beta`$, with
 each method's density and score:
 
 ![QES against tempered SMC on the double well](examples/figures/qes_smc.gif)
