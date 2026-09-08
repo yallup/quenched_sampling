@@ -188,9 +188,8 @@ def run(
 ) -> TemperedResult:
     """Estimate log Z by adaptive tempered SMC; n_beta prescribes an equally
     spaced ladder instead of the adaptive one."""
-    if metric_mode not in ("score", "frozen", "unit"):
-        raise ValueError(
-            f"metric_mode={metric_mode!r} is not 'score', 'frozen' or 'unit'")
+    if metric_mode not in ("score", "unit"):
+        raise ValueError(f"metric_mode={metric_mode!r} is not 'score' or 'unit'")
     acc_target, step_size = 0.574, 0.1
     step_gain = Gain(rate=0.5, kappa=0.0, floor=0.0, poly=0.15)
     metric_gain = Gain(rate=1.0, kappa=0.0, floor=0.0, poly=1.0)
