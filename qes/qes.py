@@ -474,7 +474,13 @@ def posterior_sample(key: Array, result: Result, n: int) -> np.ndarray:
         raise ValueError("no snapshots were stored; run with n_keep > 0")
     k, n_keep = snapshots.shape[:2]
     Es, log_lambdas = result.Es[:k], result.log_lambdas[:k]
-    dE = np.abs(np.gradient(Es)) if k > 1 else np.ones_like(Es)
+    # trapezium node weights on the descending grid, matching the evidence
+    # quadrature: half the gap to each neighbour, half-cells at the ends
+    if k > 1:
+        gaps = np.abs(np.diff(Es))
+        dE = 0.5 * (np.append(gaps, 0.0) + np.insert(gaps, 0, 0.0))
+    else:
+        dE = np.ones_like(Es)
     log_b = log_lambdas - Es + np.log(np.clip(dE, np.finfo(dE.dtype).tiny, None))
 
     log_a = result.log_weights[:k, :n_keep]
