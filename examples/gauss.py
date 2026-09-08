@@ -70,8 +70,9 @@ def main() -> None:
     p.add_argument("--nu", type=float, default=2.0)
     p.add_argument("--target-ess", type=float, default=0.95)
     p.add_argument("--metric", default="unit",
-                   choices=("unit", "score"),
-                   help="the archived runs use the identity mass")
+                   choices=("unit", "score", "frozen"),
+                   help="identity mass, score-adapted down the ladder, or "
+                        "score-warmed then held fixed")
     p.add_argument("--method", choices=("qes", "tempered"), default="qes")
     p.add_argument("--posterior-draws", type=int, default=20_000)
     p.add_argument("--verbose", type=int, default=0)

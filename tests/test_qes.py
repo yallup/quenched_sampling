@@ -97,6 +97,45 @@ def test_spike_slab_evidence_and_phases():
     assert np.all(np.diff(result.Es) < 0)  # strictly descending
 
 
+def test_frozen_metric_lands_on_the_closed_form():
+    """metric_mode='frozen' warms the metric then holds it down the ladder.
+    On an isotropic Gaussian (no scale transition, so mid-ladder adaptation
+    has nothing to add) the evidence should match the closed form. Not so on
+    the spike-slab: through its 10x scale jump the frozen metric loses the
+    score metric's scale tracking by design."""
+    D, sigma2 = 16, 0.25
+    tau2 = sigma2 / (1.0 + sigma2)
+
+    def U_fn(x):
+        return jnp.sum(x**2) / (2.0 * sigma2)
+
+    def log_prior(x):
+        return -0.5 * jnp.sum(x**2) - (D / 2) * jnp.log(2 * jnp.pi)
+
+    result = qes.run(
+        jax.random.key(0),
+        U_fn,
+        log_prior,
+        lambda key, n: jax.random.normal(key, (n, D)),
+        n_walkers=200,
+        n_steps=16,
+        target_ess=0.95,
+        dlogz=-3.0,
+        metric_mode="frozen",
+    )
+    assert not result.degenerate
+    assert abs(result.log_Z - (D / 2) * np.log(tau2)) < 0.5
+    assert 0.4 < result.acceptance < 0.7
+    with pytest.raises(ValueError, match="metric_mode"):
+        qes.run(
+            jax.random.key(0),
+            U_fn,
+            log_prior,
+            lambda key, n: jax.random.normal(key, (n, D)),
+            metric_mode="fixed",
+        )
+
+
 def test_tempered_misses_the_spike_by_exactly_its_evidence():
     """The structural failure of the tempered path: the deficit is not a tuning
     gap a finer ladder would close, it is the evidence of the mode never

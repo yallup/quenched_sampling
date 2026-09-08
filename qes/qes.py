@@ -183,7 +183,7 @@ def _build_level(
             min_U=jnp.minimum(state.min_U,
                               jnp.min(jnp.where(jnp.isfinite(U), U, jnp.inf))),
             step=drift_update(state.step, acceptance - acc_target, step_gain),
-            metric=(state.metric if metric_mode == "unit"
+            metric=(state.metric if metric_mode != "score"
                     else drift_update(
                         state.metric, log_sd - state.metric.value,
                         metric_gain)),
@@ -342,13 +342,14 @@ def run(
         Place E_0 at the n_start-th smallest prior energy; for priors with a
         divergent core.
     metric_mode
-        "score" adapts the diagonal metric down the ladder; "unit" is the
-        identity throughout.
+        "score" adapts the diagonal metric down the ladder; "frozen" warms it
+        during warmup then holds it fixed; "unit" is the identity throughout.
     resample_ess
         Full-resample trigger on the lineage-grouped ESS fraction.
     """
-    if metric_mode not in ("score", "unit"):
-        raise ValueError(f"metric_mode={metric_mode!r} is not 'score' or 'unit'")
+    if metric_mode not in ("score", "frozen", "unit"):
+        raise ValueError(
+            f"metric_mode={metric_mode!r} is not 'score', 'frozen' or 'unit'")
     acc_target, step_size = 0.574, 0.1
     step_gain = Gain(rate=0.5, kappa=0.0, floor=0.0, poly=0.15)
     metric_gain = Gain(rate=1.0, kappa=0.0, floor=0.0, poly=1.0)
