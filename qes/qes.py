@@ -257,10 +257,11 @@ def _build_level(
             ess=jnp.exp(log_ess(log_W) - log_ess(state.log_W)),
             step_size=jnp.exp(new.step.average),
         )
-        # the pre-resampling cloud is the sample from rho_E
+        # Store the cloud and carried weights at E, matching Es[:-1] in
+        # posterior_sample. log_W above instead targets E_new.
         return new, info, LevelSample(
             walkers=state.particles[:n_keep],
-            log_w=log_W,
+            log_w=state.log_W - logsumexp(state.log_W),
         )
 
     @partial(jax.jit, static_argnames=("n",))

@@ -134,3 +134,47 @@ def test_tempered_takes_the_prescribed_ladder_when_given_one():
     assert result.n_stages == 12
     assert result.betas[-1] == 1.0
     assert np.allclose(np.diff(result.betas), 1.0 / 12, atol=1e-5)
+
+
+def test_posterior_snapshot_keeps_weights_for_its_recorded_level(monkeypatch):
+    """A transition must not attach next-level weights to the old-level cloud."""
+    import importlib
+    from types import SimpleNamespace
+
+    ladder = importlib.import_module("qes.qes")
+
+    # Identity is invariant and isolates accounting from MCMC randomness.
+    def identity_mutation(*args):
+        def mutate(key, x, E, step, sd, weights, ess):
+            return x, jnp.asarray(0.574), jnp.zeros(x.shape[1])
+        return mutate
+
+    monkeypatch.setattr(ladder, "build_mutation", identity_mutation)
+    level, _ = ladder._build_level(
+        lambda x: x[0], lambda x: -jnp.sum(x * x) / 2,
+        2.0, 0, 0.8, 0.574, Gain(), Gain(), 4, 0.5,
+    )
+    weights = jnp.array([0.1, 0.2, 0.3, 0.4])
+    x = jnp.arange(4.0)[:, None]
+    state = ladder.LadderState(
+        key=jax.random.key(0), particles=x, log_W=jnp.log(weights),
+        ancestor=jnp.arange(4), U=x[:, 0], E=jnp.asarray(5.0),
+        log_lambda=jnp.asarray(0.0), log_integral=jnp.asarray(-jnp.inf),
+        min_U=jnp.asarray(0.0), step=drift_init(jnp.asarray(-2.0)),
+        metric=drift_init(jnp.zeros(1)),
+    )
+    new, _, sample = level(state)
+    assert float(new.E) < 3.0  # last walker is excluded from the NEXT level
+    np.testing.assert_allclose(sample.walkers, x)
+    np.testing.assert_allclose(jax.nn.softmax(sample.log_w), weights, rtol=1e-6)
+
+    # Match run()'s storage: one snapshot and both ladder endpoints.
+    result = SimpleNamespace(
+        snapshots=np.asarray(sample.walkers)[None],
+        log_weights=np.asarray(sample.log_w)[None],
+        Es=np.array([float(state.E), float(new.E)]),
+        log_lambdas=np.array([float(state.log_lambda), float(new.log_lambda)]),
+    )
+    draws = ladder.posterior_sample(jax.random.key(1), result, 20000)
+    frequencies = np.bincount(draws[:, 0].astype(int), minlength=4) / len(draws)
+    np.testing.assert_allclose(frequencies, weights, atol=0.015, rtol=0)
