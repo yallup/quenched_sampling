@@ -178,3 +178,27 @@ def test_posterior_snapshot_keeps_weights_for_its_recorded_level(monkeypatch):
     draws = ladder.posterior_sample(jax.random.key(1), result, 20000)
     frequencies = np.bincount(draws[:, 0].astype(int), minlength=4) / len(draws)
     np.testing.assert_allclose(frequencies, weights, atol=0.015, rtol=0)
+
+
+def test_mis_pool_recovers_the_mass_above_the_anchor():
+    """The quadrature pool cannot represent posterior mass above E_0 (no rungs
+    exist there) and over-reads the spike at D=10; the MIS pool needs only
+    x-coverage and lands on the true fraction."""
+    target = spike_slab(10)
+    key_run, key_post = jax.random.split(jax.random.key(0))
+    result = qes.run(
+        key_run,
+        target.U_fn,
+        target.log_prior,
+        target.sample_prior,
+        n_walkers=500,
+        n_steps=16,
+        target_ess=0.95,
+        dlogz=target.dlogz,
+    )
+    quad = target.spike_fraction(
+        qes.posterior_sample(key_post, result, 20000, method="quadrature"))
+    mis = target.spike_fraction(
+        qes.posterior_sample(key_post, result, 20000, method="mis"))
+    assert quad > 0.95  # the truncation signature
+    assert abs(mis - target.spike_share) < 0.05

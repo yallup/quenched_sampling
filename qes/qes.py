@@ -56,10 +56,11 @@ class LevelInfo(NamedTuple):
 
 
 class LevelSample(NamedTuple):
-    """One rung's contribution to the pooled cloud: retained walkers and
-    their carried within-rung log weights."""
+    """One rung's contribution to the pooled cloud: retained walkers, their
+    energies, and the carried within-rung log weights."""
 
     walkers: Array
+    U: Array
     log_w: Array
 
 
@@ -83,6 +84,8 @@ class Result(NamedTuple):
     log_top: float
     log_tail_bound: float
     degenerate: bool
+    snapshot_U: np.ndarray  # (n_levels, n_keep), energies of the snapshots
+    nu: float
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +264,7 @@ def _build_level(
         # posterior_sample. log_W above instead targets E_new.
         return new, info, LevelSample(
             walkers=state.particles[:n_keep],
+            U=state.U[:n_keep],
             log_w=state.log_W - logsumexp(state.log_W),
         )
 
@@ -391,7 +395,7 @@ def run(
         )
 
     Es, log_lambdas = [float(E0)], [float(log_lambda0)]
-    ess, steps, accs, snapshots, log_ws = [], [], [], [], []
+    ess, steps, accs, snapshots, snapshot_Us, log_ws = [], [], [], [], [], []
     E_prev = float(E0)
     for k in range(max_levels):
         state, info, sample = level(state)
@@ -407,6 +411,7 @@ def run(
         steps.append(float(info.step_size))
         accs.append(float(info.acceptance))
         snapshots.append(np.asarray(sample.walkers))
+        snapshot_Us.append(np.asarray(sample.U))
         log_ws.append(np.asarray(sample.log_w))
         E_prev = float(info.E)
 
@@ -462,30 +467,55 @@ def run(
         log_top=float(log_top - math.lgamma(nu + 1)),
         log_tail_bound=float(log_lambdas[-1] - min_U - math.lgamma(nu + 1)),
         degenerate=bool(degenerate),
+        snapshot_U=np.asarray(snapshot_Us) if snapshot_Us else np.empty((0, 0)),
+        nu=float(nu),
     )
 
 
-def posterior_sample(key: Array, result: Result, n: int) -> np.ndarray:
-    """Draw equally weighted posterior samples from the pooled path, weighting
-    walker j of rung k by Lambda(E_k) e^-E_k dE_k times its within-rung
-    weight."""
+def posterior_sample(
+    key: Array, result: Result, n: int, method: str = "quadrature"
+) -> np.ndarray:
+    """Draw equally weighted posterior samples from the pooled path.
+
+    "quadrature" picks a rung by Lambda(E_k) e^-E_k dE_k (trapezium weights),
+    then a walker within it. "mis" importance-reweights every walker straight
+    to the posterior against the mixture of rung densities,
+    w ∝ a e^-U / sum_k rho_{E_k}(x); it needs only that the clouds cover the
+    posterior in x, so it is insensitive to the anchor truncation at E_0 and
+    to the stopping depth.
+    """
     snapshots = result.snapshots
     if snapshots.size == 0:
         raise ValueError("no snapshots were stored; run with n_keep > 0")
     k, n_keep = snapshots.shape[:2]
     Es, log_lambdas = result.Es[:k], result.log_lambdas[:k]
-    # trapezium node weights on the descending grid: half the gap to each
-    # neighbour, half-cells at the ends
-    pad = np.concatenate([Es[:1], Es, Es[-1:]])
-    dE = 0.5 * (pad[:-2] - pad[2:])
-    log_b = log_lambdas - Es + np.log(np.clip(dE, np.finfo(dE.dtype).tiny, None))
 
     log_a = result.log_weights[:k, :n_keep]
     a = np.exp(log_a - log_a.max(axis=1, keepdims=True))
     a /= a.sum(axis=1, keepdims=True)
-    q = np.exp(log_b - log_b.max())[:, None] * a
-    q = (q / q.sum()).ravel()
 
+    tiny = np.finfo(np.float64).tiny
+    if method == "quadrature":
+        # trapezium node weights on the descending grid: half the gap to each
+        # neighbour, half-cells at the ends
+        pad = np.concatenate([Es[:1], Es, Es[-1:]])
+        dE = 0.5 * (pad[:-2] - pad[2:])
+        log_q = (log_lambdas - Es + np.log(np.clip(dE, tiny, None)))[:, None] \
+            + np.log(np.clip(a, tiny, None))
+    elif method == "mis":
+        U = np.asarray(result.snapshot_U[:k], np.float64).ravel()
+        gap = Es.astype(np.float64)[:, None] - U[None, :]
+        with np.errstate(divide="ignore"):
+            log_rho = np.where(gap > 0, result.nu * np.log(np.clip(gap, tiny, None)),
+                               -np.inf) - log_lambdas.astype(np.float64)[:, None]
+        log_q = np.log(np.clip(a, tiny, None)).ravel() - U \
+            - np.logaddexp.reduce(log_rho, axis=0)
+    else:
+        raise ValueError(f"method={method!r} is not 'quadrature' or 'mis'")
+
+    log_q = np.asarray(log_q).ravel()
+    q = np.exp(log_q - log_q.max())
+    q /= q.sum()
     draws = np.asarray(jax.random.choice(key, q.size, (n,), p=jnp.asarray(q)))
     return snapshots.reshape(-1, snapshots.shape[-1])[draws]
 
