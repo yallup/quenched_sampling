@@ -21,6 +21,7 @@ The prior is smooth by design: a flat box imposed as an indicator puts back the
 boundary the soft level exists to remove.
 """
 import argparse
+import math
 import time
 from dataclasses import dataclass
 from typing import Callable
@@ -105,19 +106,27 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--D", type=int, default=10)
     p.add_argument("--seeds", type=int, default=1)
-    p.add_argument("--walkers", type=int, default=500)
-    p.add_argument("--steps", type=int, default=16, help="mutation steps per level")
+    p.add_argument("--walkers", type=int, default=1000)
+    p.add_argument("--steps", type=int, default=None,
+                   help="default: the paper rule, 2^ceil(log2 max(16, sqrt D))")
     p.add_argument("--nu", type=float, default=2.0)
-    p.add_argument("--target-ess", type=float, default=0.8)
+    p.add_argument("--target-ess", type=float, default=0.95)
     p.add_argument("--posterior-draws", type=int, default=20_000)
     p.add_argument("--verbose", type=int, default=0, help="print every k levels")
     p.add_argument("--method", choices=("qes", "tempered"), default="qes",
                    help="the quenched ladder, or the tempered SMC baseline "
                         "matched to it in population, kernel, budget and ESS")
+    p.add_argument("--pool", choices=("quadrature", "mis"), default="quadrature",
+                   help="qes only: posterior pooling rule for the drawn samples")
     p.add_argument("--n-beta", type=int, default=None,
                    help="tempered only: prescribe an equally spaced ladder of "
                         "this many stages instead of reading it off the ESS")
     args = p.parse_args()
+    if args.steps is None:
+        # ~sqrt(D) inner steps, rounded up to a power of two, floored at the
+        # calibrated 16: a random walk needs O(sqrt(D)) steps to cross a
+        # D-dimensional shell.
+        args.steps = int(2 ** math.ceil(math.log2(max(16.0, math.sqrt(args.D)))))
 
     target = spike_slab(args.D)
     print(
@@ -128,6 +137,8 @@ def main() -> None:
         f"  phase shells at  |x| = {target.shell_radii[0]:.3f} (slab), "
         f"{target.shell_radii[1]:.3f} (spike)\n"
         f"  dlogz            {target.dlogz:12.1f}\n"
+        f"  walkers {args.walkers}  steps {args.steps}  "
+        f"target ESS {args.target_ess}\n"
     )
 
     log_Zs = []
@@ -147,7 +158,8 @@ def main() -> None:
                 dlogz=target.dlogz,
                 verbose=args.verbose,
             )
-            draws = qes.posterior_sample(key_post, result, args.posterior_draws)
+            draws = qes.posterior_sample(
+                key_post, result, args.posterior_draws, method=args.pool)
             rungs, rung_name = result.n_levels, "levels"
             extra = (f"  unvisited bound  "
                      f"{result.log_tail_bound - result.log_Z:12.1f} nats\n")
