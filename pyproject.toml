@@ -2,7 +2,7 @@
 name = "qes"
 version = "0.1.0"
 description = "Quenched ensemble sampling"
-authors = [{ name = "David Yallup" }]
+authors = [{ name = "XXXX" }]
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 readme = "README.md"

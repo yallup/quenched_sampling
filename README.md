@@ -58,22 +58,3 @@ diagonal metric read from the previous level's particle scores, and a single
 scalar step size is held near the optimal acceptance rate by a constant-gain
 controller.
 
-## Citation
- 
-```bibtex
-@misc{yallup2026quenchedensemblesampling,
-      title={Quenched Ensemble Sampling}, 
-      author={David Yallup},
-      year={2026},
-      eprint={2609.15894},
-      archivePrefix={arXiv},
-      primaryClass={stat.ML},
-      url={https://arxiv.org/abs/2609.15894}, 
-}
-```
-
----
-
-© 2026 David Yallup. Released under the [Apache 2.0 license](LICENSE).
-
-This work was supported by a Google Research Grant
