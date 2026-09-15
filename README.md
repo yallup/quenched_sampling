@@ -75,4 +75,5 @@ controller.
 ---
 
 © 2026 David Yallup. Released under the [Apache 2.0 license](LICENSE).
-© This work was supported by a Google Research Grant
+
+This work was supported by a Google Research Grant
