@@ -79,7 +79,9 @@ def next_beta(U: Array, beta: Array, target_ess: float) -> Array:
 
 def _build_stage(U_fn, log_prior, n_steps, acc_target, step_gain, metric_gain,
                  n_keep, metric_mode="score"):
-    mutate = build_mutation(tempered_logdensity(U_fn, log_prior), n_steps)
+    logdensity = tempered_logdensity(U_fn, log_prior)
+    mutate = build_mutation(logdensity, n_steps)
+    mutate_once = build_mutation(logdensity, 1)
     U_batched = jax.vmap(U_fn)
 
     def mutate_and_adapt(state: TemperedState, ess_frac: Array):
@@ -141,22 +143,19 @@ def _build_stage(U_fn, log_prior, n_steps, acc_target, step_gain, metric_gain,
 
     @partial(jax.jit, static_argnames=("n",))
     def warmup(state: TemperedState, n: int):
-        """Dual-averaging warmup at the first stage's beta."""
+        """Dual-averaging warmup at the first stage's beta: n MALA steps, the
+        step size and metric updated after each, as the ladder's warmup."""
 
         def body(carry, key):
             st, da = carry
             n_w = st.particles.shape[0]
-            x, acceptance, log_sd = mutate(
+            x, acceptance, log_sd = mutate_once(
                 key, st.particles, st.beta,
                 jnp.exp(da.log_step), jnp.exp(st.metric.value),
                 jnp.full((n_w,), 1.0 / n_w), jnp.asarray(1.0),
             )
-            U = U_batched(x)
             st = st._replace(
                 particles=x,
-                U=U,
-                min_U=jnp.minimum(
-                    st.min_U, jnp.min(jnp.where(jnp.isfinite(U), U, jnp.inf))),
                 metric=(st.metric if metric_mode == "unit" else drift_update(
                     st.metric, log_sd - st.metric.value, metric_gain)),
             )
@@ -165,7 +164,14 @@ def _build_stage(U_fn, log_prior, n_steps, acc_target, step_gain, metric_gain,
         key, key_w = jax.random.split(state.key)
         carry = (state._replace(key=key), dual_init(state.step.value))
         (st, da), accs = jax.lax.scan(body, carry, jax.random.split(key_w, n))
-        return st._replace(step=drift_init(da.log_step_bar)), accs
+        # one energy evaluation for the warmed population
+        U = U_batched(st.particles)
+        return st._replace(
+            U=U,
+            min_U=jnp.minimum(
+                st.min_U, jnp.min(jnp.where(jnp.isfinite(U), U, jnp.inf))),
+            step=drift_init(da.log_step_bar),
+        ), accs
 
     return stage, warmup
 
@@ -178,21 +184,23 @@ def run(
     *,
     n_walkers: int = 500,
     n_steps: int = 16,
-    target_ess: float = 0.8,
+    target_ess: float = 0.95,
     n_beta: int | None = None,
-    n_warmup: int = 30,
+    n_warmup: int | None = None,
     metric_mode: str = "score",
     max_stages: int = 20_000,
     n_keep: int = 40,
     verbose: int = 0,
 ) -> TemperedResult:
     """Estimate log Z by adaptive tempered SMC; n_beta prescribes an equally
-    spaced ladder instead of the adaptive one."""
+    spaced ladder instead of the adaptive one. n_warmup: MALA steps at the
+    first stage's beta, default n_steps, as qes.run."""
     if metric_mode not in ("score", "unit"):
         raise ValueError(f"metric_mode={metric_mode!r} is not 'score' or 'unit'")
     acc_target, step_size = 0.574, 0.1
     step_gain = Gain(rate=0.5, kappa=0.0, floor=0.0, poly=0.15)
     metric_gain = Gain(rate=1.0, kappa=0.0, floor=0.0, poly=1.0)
+    n_warmup = n_steps if n_warmup is None else n_warmup
     key, key_init, key_run = jax.random.split(key, 3)
     x = sample_prior(key_init, n_walkers)
     U = jax.vmap(U_fn)(x)
@@ -230,7 +238,8 @@ def run(
     state = state._replace(beta=jnp.zeros((), x.dtype))
     if verbose:
         print(
-            f"  warmup: beta1 {beta1:.4g}  acc {float(warm_acc[-1]):.3f}  "
+            f"  warmup: beta1 {beta1:.4g}  "
+            f"acc {float(warm_acc[-1]) if len(warm_acc) else float('nan'):.3f}  "
             f"step {float(jnp.exp(state.step.average)):.3e}",
             flush=True,
         )
@@ -291,7 +300,8 @@ def run(
         min_U=float(state.min_U),
         n_stages=len(betas),
         pooled_kish=float(q.sum() ** 2 / np.sum(q**2)) if q.size else 0.0,
-        grad_evals=float((len(betas) + n_warmup) * n_walkers * (n_steps + 1)),
+        grad_evals=float(len(betas) * n_walkers * (n_steps + 1)
+                         + n_walkers * (n_warmup + 1)),
         degenerate=bool(degenerate),
     )
 
