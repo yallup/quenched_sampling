@@ -15,8 +15,8 @@ from blackjax.smc.ess import ess_solver, log_ess
 from blackjax.smc.resampling import systematic
 from blackjax.smc.solver import dichotomy
 
-from .adapt import Drift, Gain, drift_init, drift_update, dual_init, dual_update
-from .kernel import build_mutation
+from .adapt import Drift, Gain, drift_init, drift_update
+from .kernel import build_mutation, build_warmup
 
 
 def tempered_logdensity(U_fn: Callable, log_prior: Callable) -> Callable:
@@ -79,7 +79,9 @@ def next_beta(U: Array, beta: Array, target_ess: float) -> Array:
 
 def _build_stage(U_fn, log_prior, n_steps, acc_target, step_gain, metric_gain,
                  n_keep, metric_mode="score"):
-    mutate = build_mutation(tempered_logdensity(U_fn, log_prior), n_steps)
+    logdensity = tempered_logdensity(U_fn, log_prior)
+    mutate = build_mutation(logdensity, n_steps)
+    warm = build_warmup(logdensity, acc_target, metric_mode == "score")
     U_batched = jax.vmap(U_fn)
 
     def mutate_and_adapt(state: TemperedState, ess_frac: Array):
@@ -141,31 +143,21 @@ def _build_stage(U_fn, log_prior, n_steps, acc_target, step_gain, metric_gain,
 
     @partial(jax.jit, static_argnames=("n",))
     def warmup(state: TemperedState, n: int):
-        """Dual-averaging warmup at the first stage's beta."""
-
-        def body(carry, key):
-            st, da = carry
-            n_w = st.particles.shape[0]
-            x, acceptance, log_sd = mutate(
-                key, st.particles, st.beta,
-                jnp.exp(da.log_step), jnp.exp(st.metric.value),
-                jnp.full((n_w,), 1.0 / n_w), jnp.asarray(1.0),
-            )
-            U = U_batched(x)
-            st = st._replace(
-                particles=x,
-                U=U,
-                min_U=jnp.minimum(
-                    st.min_U, jnp.min(jnp.where(jnp.isfinite(U), U, jnp.inf))),
-                metric=(st.metric if metric_mode == "unit" else drift_update(
-                    st.metric, log_sd - st.metric.value, metric_gain)),
-            )
-            return (st, dual_update(da, acceptance, acc_target)), acceptance
-
+        """Dual-averaging warmup at the first stage's beta, as the ladder's."""
         key, key_w = jax.random.split(state.key)
-        carry = (state._replace(key=key), dual_init(state.step.value))
-        (st, da), accs = jax.lax.scan(body, carry, jax.random.split(key_w, n))
-        return st._replace(step=drift_init(da.log_step_bar)), accs
+        x, log_step, log_sd, accs = warm(
+            key_w, state.particles, state.beta, state.step.value,
+            state.metric.value, n)
+        U = U_batched(x)
+        return state._replace(
+            key=key,
+            particles=x,
+            U=U,
+            min_U=jnp.minimum(
+                state.min_U, jnp.min(jnp.where(jnp.isfinite(U), U, jnp.inf))),
+            step=drift_init(log_step),
+            metric=drift_init(log_sd),
+        ), accs
 
     return stage, warmup
 
@@ -178,9 +170,8 @@ def run(
     *,
     n_walkers: int = 500,
     n_steps: int = 16,
-    target_ess: float = 0.8,
+    target_ess: float = 0.95,
     n_beta: int | None = None,
-    n_warmup: int = 30,
     metric_mode: str = "score",
     max_stages: int = 20_000,
     n_keep: int = 40,
@@ -226,7 +217,7 @@ def run(
         else float(grid[0])
     )
     state, warm_acc = warmup(state._replace(beta=jnp.asarray(beta1, x.dtype)),
-                             n_warmup)
+                             n_steps)
     state = state._replace(beta=jnp.zeros((), x.dtype))
     if verbose:
         print(
@@ -291,7 +282,7 @@ def run(
         min_U=float(state.min_U),
         n_stages=len(betas),
         pooled_kish=float(q.sum() ** 2 / np.sum(q**2)) if q.size else 0.0,
-        grad_evals=float((len(betas) + n_warmup) * n_walkers * (n_steps + 1)),
+        grad_evals=float((len(betas) + 1) * n_walkers * (n_steps + 1)),
         degenerate=bool(degenerate),
     )
 

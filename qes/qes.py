@@ -19,8 +19,8 @@ from blackjax.smc.ess import log_ess
 from blackjax.smc.resampling import systematic
 from blackjax.smc.solver import dichotomy
 
-from .adapt import Drift, Gain, drift_init, drift_update, dual_init, dual_update
-from .kernel import build_mutation
+from .adapt import Drift, Gain, drift_init, drift_update
+from .kernel import build_mutation, build_warmup
 from .level import (
     boundary,
     ess_fraction,
@@ -151,8 +151,11 @@ def _build_level(
     U_fn, log_prior, nu, n_steps, target_ess, acc_target, step_gain, metric_gain,
     n_keep, resample_ess, metric_mode="score",
 ):
-    """Compile a mutate-and-adapt pass and one full level transition."""
-    mutate = build_mutation(level_logdensity(U_fn, log_prior, nu), n_steps)
+    """Compile a mutate-and-adapt pass, one full level transition, and the
+    warmup."""
+    logdensity = level_logdensity(U_fn, log_prior, nu)
+    mutate = build_mutation(logdensity, n_steps)
+    warm = build_warmup(logdensity, acc_target, metric_mode == "score")
     U_batched = jax.vmap(U_fn)
 
     def mutate_and_adapt(state: LadderState):
@@ -270,32 +273,23 @@ def _build_level(
 
     @partial(jax.jit, static_argnames=("n",))
     def warmup(state: LadderState, n: int):
-        """Dual-averaging warmup at E_0: sets the step size, warms the
-        metric, and equilibrates the anchor cloud."""
-
-        def body(carry, key):
-            st, da = carry
-            n_w = st.particles.shape[0]
-            x, acceptance, log_sd = mutate(
-                key, st.particles, st.E,
-                jnp.exp(da.log_step), jnp.exp(st.metric.value),
-                jnp.full((n_w,), 1.0 / n_w), jnp.asarray(1.0),
-            )
-            U = U_batched(x)
-            st = st._replace(
-                particles=x,
-                U=U,
-                min_U=jnp.minimum(
-                    st.min_U, jnp.min(jnp.where(jnp.isfinite(U), U, jnp.inf))),
-                metric=(st.metric if metric_mode == "unit" else drift_update(
-                    st.metric, log_sd - st.metric.value, metric_gain)),
-            )
-            return (st, dual_update(da, acceptance, acc_target)), acceptance
-
+        """Dual-averaging warmup at E_0. The anchor has already resampled the
+        population to rho_{E_0}, so the warmup only tunes the kernel: the
+        metric measured once there, then n MALA steps for the step size."""
         key, key_w = jax.random.split(state.key)
-        carry = (state._replace(key=key), dual_init(state.step.value))
-        (st, da), accs = jax.lax.scan(body, carry, jax.random.split(key_w, n))
-        return st._replace(step=drift_init(da.log_step_bar)), accs
+        x, log_step, log_sd, accs = warm(
+            key_w, state.particles, state.E, state.step.value,
+            state.metric.value, n)
+        U = U_batched(x)
+        return state._replace(
+            key=key,
+            particles=x,
+            U=U,
+            min_U=jnp.minimum(
+                state.min_U, jnp.min(jnp.where(jnp.isfinite(U), U, jnp.inf))),
+            step=drift_init(log_step),
+            metric=drift_init(log_sd),
+        ), accs
 
     return level, warmup
 
@@ -312,11 +306,10 @@ def run(
     nu: float = 2.0,
     n_walkers: int = 500,
     n_steps: int = 16,
-    target_ess: float = 0.8,
+    target_ess: float = 0.95,
     dlogz: float = -10.0,
     n_init: int | None = None,
     n_start: int | None = None,
-    n_warmup: int = 30,
     metric_mode: str = "score",
     resample_ess: float = 0.5,
     max_levels: int = 20_000,
@@ -385,7 +378,8 @@ def run(
         metric=drift_init(jnp.log(sd0)),
     )
 
-    state, warm_acc = warmup(state, n_warmup)
+    # one level's worth of single-step updates
+    state, warm_acc = warmup(state, n_steps)
     if verbose:
         print(
             f"  warmup: E0 {float(E0):.4f}  "
@@ -462,7 +456,7 @@ def run(
         acceptance=acceptance,
         min_U=min_U,
         n_levels=n_levels,
-        grad_evals=float((n_levels + n_warmup) * n_walkers * (n_steps + 1)),
+        grad_evals=float((n_levels + 1) * n_walkers * (n_steps + 1)),
         U_evals=int(n_init),
         log_top=float(log_top - math.lgamma(nu + 1)),
         log_tail_bound=float(log_lambdas[-1] - min_U - math.lgamma(nu + 1)),

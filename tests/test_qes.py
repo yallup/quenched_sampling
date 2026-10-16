@@ -97,6 +97,31 @@ def test_spike_slab_evidence_and_phases():
     assert np.all(np.diff(result.Es) < 0)  # strictly descending
 
 
+def test_one_level_warmup_tunes_the_step(monkeypatch):
+    """The warmup is n_steps single MALA steps at E_0, a dual-averaging update
+    after each: one level's gradients, and it starts the ladder at the step a
+    sixteen-times longer warmup finds."""
+    import importlib
+
+    ladder = importlib.import_module("qes.qes")
+    target = spike_slab(10)
+    kw = dict(n_walkers=200, n_steps=16, dlogz=target.dlogz)
+    args = (target.U_fn, target.log_prior, target.sample_prior)
+    short = qes.run(jax.random.key(0), *args, **kw)
+
+    build = ladder._build_level
+
+    def build_long(*a, **k):
+        level, warmup = build(*a, **k)
+        return level, lambda state, n: warmup(state, 16 * n)
+
+    monkeypatch.setattr(ladder, "_build_level", build_long)
+    long = qes.run(jax.random.key(0), *args, **kw)
+    assert abs(np.log(short.step_sizes[0] / long.step_sizes[0])) < 0.3
+    assert np.log(short.step_sizes[0] / 0.1) > 0.5  # moved off the initial step
+    assert abs(short.log_Z - target.log_Z) < 1.0
+
+
 def test_tempered_misses_the_spike_by_exactly_its_evidence():
     """The structural failure of the tempered path: the deficit is not a tuning
     gap a finer ladder would close, it is the evidence of the mode never
