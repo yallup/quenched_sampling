@@ -1,4 +1,5 @@
 """Mutation kernel: blackjax MALA, preconditioned by the score."""
+from functools import partial
 from typing import Callable
 
 import jax
@@ -6,6 +7,8 @@ import jax.numpy as jnp
 from jax import Array
 
 from blackjax.mcmc import mala
+
+from .adapt import dual_init, dual_update
 
 _mala_kernel = mala.build_kernel()
 
@@ -72,3 +75,44 @@ def build_mutation(logdensity_fn: Callable, n_steps: int) -> Callable:
             pattern, log_g2, weights, ess_frac)
 
     return mutate
+
+
+def build_warmup(logdensity_fn: Callable, acc_target: float,
+                 adapt_metric: bool) -> Callable:
+    """Build the warmup at a fixed level: measure the metric once from the
+    population's scores, then n single MALA steps in it, dual averaging the
+    step size after each. n + 1 gradients per walker.
+
+    Returns a jitted (key, particles, E, log_step, log_sd, n) ->
+    (positions, log_step_bar, log_sd, acceptances).
+    """
+
+    @partial(jax.jit, static_argnames=("n",))
+    def warmup(key: Array, particles: Array, E: Array, log_step: Array,
+               log_sd: Array, n: int):
+        n_w = particles.shape[0]
+        ld, g = jax.vmap(jax.value_and_grad(logdensity_fn), (0, None))(particles, E)
+        if adapt_metric:
+            g2 = jnp.sum(g**2, axis=1)
+            log_sd = _log_metric(g**2 / g2[:, None], jnp.log(g2),
+                                 jnp.ones_like(g2), jnp.ones_like(E))
+        sd = jnp.exp(log_sd)
+        logdensity = lambda y: logdensity_fn(y * sd, E)
+        # the measured score seeds the chains: grad_y log p(y sd) = sd g
+        state = mala.MALAState(particles / sd, ld, g * sd)
+
+        def body(carry, key):
+            state, da = carry
+            step = jnp.exp(da.log_step)
+            state, info = jax.vmap(
+                lambda k, s: _mala_kernel(k, s, logdensity, step)
+            )(jax.random.split(key, n_w), state)
+            acceptance = jnp.mean(info.acceptance_rate)
+            return (state, dual_update(da, acceptance, acc_target)), acceptance
+
+        (state, da), acceptance = jax.lax.scan(
+            body, (state, dual_init(log_step)), jax.random.split(key, n)
+        )
+        return state.position * sd, da.log_step_bar, log_sd, acceptance
+
+    return warmup

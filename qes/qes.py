@@ -19,8 +19,8 @@ from blackjax.smc.ess import log_ess
 from blackjax.smc.resampling import systematic
 from blackjax.smc.solver import dichotomy
 
-from .adapt import Drift, Gain, drift_init, drift_update, dual_init, dual_update
-from .kernel import build_mutation
+from .adapt import Drift, Gain, drift_init, drift_update
+from .kernel import build_mutation, build_warmup
 from .level import (
     boundary,
     ess_fraction,
@@ -155,7 +155,7 @@ def _build_level(
     warmup."""
     logdensity = level_logdensity(U_fn, log_prior, nu)
     mutate = build_mutation(logdensity, n_steps)
-    mutate_once = build_mutation(logdensity, 1)
+    warm = build_warmup(logdensity, acc_target, metric_mode == "score")
     U_batched = jax.vmap(U_fn)
 
     def mutate_and_adapt(state: LadderState):
@@ -273,36 +273,22 @@ def _build_level(
 
     @partial(jax.jit, static_argnames=("n",))
     def warmup(state: LadderState, n: int):
-        """Dual-averaging warmup at E_0: n MALA steps, the step size and
-        metric updated after each. The anchor has already resampled the
-        population to rho_{E_0}, so the warmup only tunes the kernel; the
-        first level then mutates at E_0 with the tuned step."""
-
-        def body(carry, key):
-            st, da = carry
-            n_w = st.particles.shape[0]
-            x, acceptance, log_sd = mutate_once(
-                key, st.particles, st.E,
-                jnp.exp(da.log_step), jnp.exp(st.metric.value),
-                jnp.full((n_w,), 1.0 / n_w), jnp.asarray(1.0),
-            )
-            st = st._replace(
-                particles=x,
-                metric=(st.metric if metric_mode == "unit" else drift_update(
-                    st.metric, log_sd - st.metric.value, metric_gain)),
-            )
-            return (st, dual_update(da, acceptance, acc_target)), acceptance
-
+        """Dual-averaging warmup at E_0. The anchor has already resampled the
+        population to rho_{E_0}, so the warmup only tunes the kernel: the
+        metric measured once there, then n MALA steps for the step size."""
         key, key_w = jax.random.split(state.key)
-        carry = (state._replace(key=key), dual_init(state.step.value))
-        (st, da), accs = jax.lax.scan(body, carry, jax.random.split(key_w, n))
-        # one energy evaluation for the warmed population
-        U = U_batched(st.particles)
-        return st._replace(
+        x, log_step, log_sd, accs = warm(
+            key_w, state.particles, state.E, state.step.value,
+            state.metric.value, n)
+        U = U_batched(x)
+        return state._replace(
+            key=key,
+            particles=x,
             U=U,
             min_U=jnp.minimum(
-                st.min_U, jnp.min(jnp.where(jnp.isfinite(U), U, jnp.inf))),
-            step=drift_init(da.log_step_bar),
+                state.min_U, jnp.min(jnp.where(jnp.isfinite(U), U, jnp.inf))),
+            step=drift_init(log_step),
+            metric=drift_init(log_sd),
         ), accs
 
     return level, warmup
