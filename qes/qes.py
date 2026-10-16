@@ -310,7 +310,6 @@ def run(
     dlogz: float = -10.0,
     n_init: int | None = None,
     n_start: int | None = None,
-    n_warmup: int | None = None,
     metric_mode: str = "score",
     resample_ess: float = 0.5,
     max_levels: int = 20_000,
@@ -335,9 +334,6 @@ def run(
     n_start
         Place E_0 at the n_start-th smallest prior energy; for priors with a
         divergent core.
-    n_warmup
-        MALA steps at E_0 before the ladder, each followed by a dual-averaging
-        update of the step size; default n_steps, one level's worth.
     metric_mode
         "score" adapts the diagonal metric down the ladder; "unit" is the
         identity throughout.
@@ -350,7 +346,6 @@ def run(
     step_gain = Gain(rate=0.5, kappa=0.0, floor=0.0, poly=0.15)
     metric_gain = Gain(rate=1.0, kappa=0.0, floor=0.0, poly=1.0)
     n_init = 10 * n_walkers if n_init is None else n_init
-    n_warmup = n_steps if n_warmup is None else n_warmup
     if n_init < n_walkers:
         raise ValueError(f"n_init={n_init} cannot furnish n_walkers={n_walkers}")
 
@@ -383,7 +378,8 @@ def run(
         metric=drift_init(jnp.log(sd0)),
     )
 
-    state, warm_acc = warmup(state, n_warmup)
+    # one level's worth of single-step updates
+    state, warm_acc = warmup(state, n_steps)
     if verbose:
         print(
             f"  warmup: E0 {float(E0):.4f}  "
@@ -460,8 +456,7 @@ def run(
         acceptance=acceptance,
         min_U=min_U,
         n_levels=n_levels,
-        grad_evals=float(n_levels * n_walkers * (n_steps + 1)
-                         + n_walkers * (n_warmup + 1)),
+        grad_evals=float((n_levels + 1) * n_walkers * (n_steps + 1)),
         U_evals=int(n_init),
         log_top=float(log_top - math.lgamma(nu + 1)),
         log_tail_bound=float(log_lambdas[-1] - min_U - math.lgamma(nu + 1)),

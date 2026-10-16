@@ -97,16 +97,26 @@ def test_spike_slab_evidence_and_phases():
     assert np.all(np.diff(result.Es) < 0)  # strictly descending
 
 
-def test_default_warmup_is_one_level_and_tunes_the_step():
-    """The default warmup is n_steps single MALA steps at E_0, a dual-averaging
-    update after each: it costs one level's gradients and starts the ladder at
-    the step a sixteen-times longer warmup finds."""
+def test_one_level_warmup_tunes_the_step(monkeypatch):
+    """The warmup is n_steps single MALA steps at E_0, a dual-averaging update
+    after each: one level's gradients, and it starts the ladder at the step a
+    sixteen-times longer warmup finds."""
+    import importlib
+
+    ladder = importlib.import_module("qes.qes")
     target = spike_slab(10)
     kw = dict(n_walkers=200, n_steps=16, dlogz=target.dlogz)
     args = (target.U_fn, target.log_prior, target.sample_prior)
     short = qes.run(jax.random.key(0), *args, **kw)
-    long = qes.run(jax.random.key(0), *args, n_warmup=256, **kw)
-    assert short.grad_evals == (short.n_levels + 1) * 200 * 17
+
+    build = ladder._build_level
+
+    def build_long(*a, **k):
+        level, warmup = build(*a, **k)
+        return level, lambda state, n: warmup(state, 16 * n)
+
+    monkeypatch.setattr(ladder, "_build_level", build_long)
+    long = qes.run(jax.random.key(0), *args, **kw)
     assert abs(np.log(short.step_sizes[0] / long.step_sizes[0])) < 0.3
     assert np.log(short.step_sizes[0] / 0.1) > 0.5  # moved off the initial step
     assert abs(short.log_Z - target.log_Z) < 1.0

@@ -172,21 +172,18 @@ def run(
     n_steps: int = 16,
     target_ess: float = 0.95,
     n_beta: int | None = None,
-    n_warmup: int | None = None,
     metric_mode: str = "score",
     max_stages: int = 20_000,
     n_keep: int = 40,
     verbose: int = 0,
 ) -> TemperedResult:
     """Estimate log Z by adaptive tempered SMC; n_beta prescribes an equally
-    spaced ladder instead of the adaptive one. n_warmup: MALA steps at the
-    first stage's beta, default n_steps, as qes.run."""
+    spaced ladder instead of the adaptive one."""
     if metric_mode not in ("score", "unit"):
         raise ValueError(f"metric_mode={metric_mode!r} is not 'score' or 'unit'")
     acc_target, step_size = 0.574, 0.1
     step_gain = Gain(rate=0.5, kappa=0.0, floor=0.0, poly=0.15)
     metric_gain = Gain(rate=1.0, kappa=0.0, floor=0.0, poly=1.0)
-    n_warmup = n_steps if n_warmup is None else n_warmup
     key, key_init, key_run = jax.random.split(key, 3)
     x = sample_prior(key_init, n_walkers)
     U = jax.vmap(U_fn)(x)
@@ -220,12 +217,11 @@ def run(
         else float(grid[0])
     )
     state, warm_acc = warmup(state._replace(beta=jnp.asarray(beta1, x.dtype)),
-                             n_warmup)
+                             n_steps)
     state = state._replace(beta=jnp.zeros((), x.dtype))
     if verbose:
         print(
-            f"  warmup: beta1 {beta1:.4g}  "
-            f"acc {float(warm_acc[-1]) if len(warm_acc) else float('nan'):.3f}  "
+            f"  warmup: beta1 {beta1:.4g}  acc {float(warm_acc[-1]):.3f}  "
             f"step {float(jnp.exp(state.step.average)):.3e}",
             flush=True,
         )
@@ -286,8 +282,7 @@ def run(
         min_U=float(state.min_U),
         n_stages=len(betas),
         pooled_kish=float(q.sum() ** 2 / np.sum(q**2)) if q.size else 0.0,
-        grad_evals=float(len(betas) * n_walkers * (n_steps + 1)
-                         + n_walkers * (n_warmup + 1)),
+        grad_evals=float((len(betas) + 1) * n_walkers * (n_steps + 1)),
         degenerate=bool(degenerate),
     )
 
